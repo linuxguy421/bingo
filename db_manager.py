@@ -27,11 +27,14 @@ PRAGMA foreign_keys = ON;
 
 -- ── Patterns ───────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS patterns (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT    NOT NULL UNIQUE,
-    mask        TEXT    NOT NULL,   -- JSON 5x5 boolean array
-    is_custom   INTEGER NOT NULL DEFAULT 0,
-    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    name               TEXT    NOT NULL UNIQUE,
+    mask               TEXT    NOT NULL,   -- JSON 5x5 boolean array (union for compounds)
+    is_custom          INTEGER NOT NULL DEFAULT 0,
+    is_compound        INTEGER NOT NULL DEFAULT 0,
+    compound_operator  TEXT    NOT NULL DEFAULT 'OR',
+    compound_members   TEXT    NOT NULL DEFAULT '[]',  -- JSON list of member pattern IDs
+    created_at         TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 -- ── Cards ──────────────────────────────────────────────────────────────────
@@ -255,6 +258,17 @@ class DatabaseManager:
                 INSERT OR IGNORE INTO game_patterns (game_id, pattern_id)
                 SELECT id, pattern_id FROM games WHERE pattern_id IS NOT NULL
             """)
+        # Add compound columns to patterns table if they don't exist yet
+        pat_cols = [r[1] for r in self._connection.execute("PRAGMA table_info(patterns)")]
+        if 'is_compound' not in pat_cols:
+            self._connection.execute(
+                "ALTER TABLE patterns ADD COLUMN is_compound INTEGER NOT NULL DEFAULT 0")
+        if 'compound_operator' not in pat_cols:
+            self._connection.execute(
+                "ALTER TABLE patterns ADD COLUMN compound_operator TEXT NOT NULL DEFAULT 'OR'")
+        if 'compound_members' not in pat_cols:
+            self._connection.execute(
+                "ALTER TABLE patterns ADD COLUMN compound_members TEXT NOT NULL DEFAULT '[]'")
         self._connection.commit()
 
     def _seed_default_patterns(self) -> None:
@@ -330,6 +344,9 @@ class DatabaseManager:
                 name=r["name"],
                 mask=json.loads(r["mask"]),
                 is_custom=bool(r["is_custom"]),
+                is_compound=bool(r["is_compound"]),
+                compound_operator=r["compound_operator"],
+                compound_member_ids=json.loads(r["compound_members"]),
             )
             for r in rows
         ]
@@ -337,8 +354,11 @@ class DatabaseManager:
     def save_pattern(self, pattern: Pattern) -> Pattern:
         with self._cursor() as cur:
             cur.execute(
-                "INSERT INTO patterns (name, mask, is_custom) VALUES (?, ?, ?)",
-                (pattern.name, json.dumps(pattern.mask), int(pattern.is_custom)),
+                "INSERT INTO patterns (name, mask, is_custom, is_compound, compound_operator, compound_members) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (pattern.name, json.dumps(pattern.mask), int(pattern.is_custom),
+                 int(pattern.is_compound), pattern.compound_operator,
+                 json.dumps(pattern.compound_member_ids)),
             )
             pattern.id = cur.lastrowid
         return pattern
@@ -346,8 +366,11 @@ class DatabaseManager:
     def update_pattern(self, pattern: Pattern) -> None:
         with self._cursor() as cur:
             cur.execute(
-                "UPDATE patterns SET name = ?, mask = ? WHERE id = ?",
-                (pattern.name, json.dumps(pattern.mask), pattern.id),
+                "UPDATE patterns SET name = ?, mask = ?, is_compound = ?, "
+                "compound_operator = ?, compound_members = ? WHERE id = ?",
+                (pattern.name, json.dumps(pattern.mask), int(pattern.is_compound),
+                 pattern.compound_operator, json.dumps(pattern.compound_member_ids),
+                 pattern.id),
             )
 
     def delete_pattern(self, pattern_id: int) -> None:
@@ -365,6 +388,9 @@ class DatabaseManager:
             name=row["name"],
             mask=json.loads(row["mask"]),
             is_custom=bool(row["is_custom"]),
+            is_compound=bool(row["is_compound"]),
+            compound_operator=row["compound_operator"],
+            compound_member_ids=json.loads(row["compound_members"]),
         )
 
     # ── Sessions ──────────────────────────────────────────────────────────

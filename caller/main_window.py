@@ -51,6 +51,19 @@ from caller.verify_panel   import VerifyPanel
 from caller.ws_server      import WSServerThread
 
 
+# ── Helper ───────────────────────────────────────────────────────────────────
+
+def _combine_masks(patterns: list) -> list[list[bool]]:
+    """Return a 5x5 mask that is the union (OR) of all supplied pattern masks."""
+    combined = [[False] * 5 for _ in range(5)]
+    for p in patterns:
+        for r in range(5):
+            for c in range(5):
+                if p.mask[r][c]:
+                    combined[r][c] = True
+    return combined
+
+
 # ── Stylesheet ────────────────────────────────────────────────────────────────
 
 APP_STYLE = """
@@ -133,9 +146,9 @@ class CallerMainWindow(QMainWindow):
         self.db = db
 
         # ── Runtime state ─────────────────────────────────────────────────
-        self._session       = None
-        self._game          = None
-        self._active_pattern: Pattern | None = None
+        self._session          = None
+        self._game             = None
+        self._active_patterns: list[Pattern] = []
         self._called_balls: list[int] = []
         self._remaining_balls: list[int] = []
         self._clients_connected = 0
@@ -216,9 +229,20 @@ class CallerMainWindow(QMainWindow):
         game_group = QGroupBox("Game Configuration")
         gf = QFormLayout(game_group)
 
-        self._pattern_combo = QComboBox()
-        self._pattern_combo.currentIndexChanged.connect(self._on_pattern_selected)
-        gf.addRow("Pattern:", self._pattern_combo)
+        # Multi-select pattern list (checkboxes)
+        gf.addRow(QLabel("Patterns (check one or more):"))
+        self._pattern_list = QListWidget()
+        self._pattern_list.setMaximumHeight(160)
+        self._pattern_list.setToolTip(
+            "Check multiple patterns — the player must satisfy ALL of them to win."
+        )
+        self._pattern_list.itemChanged.connect(self._on_pattern_selection_changed)
+        gf.addRow(self._pattern_list)
+
+        self._combined_label = QLabel()
+        self._combined_label.setStyleSheet("color:#2563EB; font-size:11px; font-style:italic;")
+        self._combined_label.setWordWrap(True)
+        gf.addRow(self._combined_label)
 
         self._prize_spin = QDoubleSpinBox()
         self._prize_spin.setPrefix("$ ")
@@ -350,58 +374,89 @@ class CallerMainWindow(QMainWindow):
     # ── Patterns Tab ─────────────────────────────────────────────────────
 
     def _build_patterns_tab(self) -> QWidget:
+        from PyQt6.QtWidgets import QRadioButton, QButtonGroup, QStackedWidget
+        from caller.pattern_widget import CompoundEditorWidget
+
         w = QWidget()
         layout = QHBoxLayout(w)
 
-        # Left: list
+        # ── Left: pattern list ────────────────────────────────────────────
         left = QVBoxLayout()
         left.addWidget(QLabel("Patterns:"))
         self._patterns_list = QListWidget()
-        self._patterns_list.setMaximumWidth(220)
+        self._patterns_list.setMaximumWidth(230)
         self._patterns_list.currentItemChanged.connect(self._on_pattern_list_select)
-        left.addWidget(self._patterns_list)
+        left.addWidget(self._patterns_list, stretch=1)
 
         btn_row = QHBoxLayout()
         new_pat_btn = QPushButton("New")
         new_pat_btn.setStyleSheet(BTN_PRIMARY)
         new_pat_btn.clicked.connect(self._new_pattern)
         btn_row.addWidget(new_pat_btn)
-
         self._del_pat_btn = QPushButton("Delete")
         self._del_pat_btn.setStyleSheet(BTN_DANGER)
         self._del_pat_btn.clicked.connect(self._delete_pattern)
         btn_row.addWidget(self._del_pat_btn)
         left.addLayout(btn_row)
-
         layout.addLayout(left)
 
-        # Right: editor
+        # ── Right: editor ─────────────────────────────────────────────────
         right = QVBoxLayout()
-        right.addWidget(QLabel("Pattern Editor (click cells to toggle):"))
 
+        # Name row
         name_row = QHBoxLayout()
         name_row.addWidget(QLabel("Name:"))
         self._pat_name_edit = QLineEdit()
-        name_row.addWidget(self._pat_name_edit)
+        name_row.addWidget(self._pat_name_edit, stretch=1)
         right.addLayout(name_row)
 
+        # Mode toggle
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Type:"))
+        self._simple_radio   = QRadioButton("Simple (draw cells)")
+        self._compound_radio = QRadioButton("Compound (group patterns)")
+        self._simple_radio.setChecked(True)
+        self._pat_mode_group = QButtonGroup(w)
+        self._pat_mode_group.addButton(self._simple_radio,   0)
+        self._pat_mode_group.addButton(self._compound_radio, 1)
+        mode_row.addWidget(self._simple_radio)
+        mode_row.addWidget(self._compound_radio)
+        mode_row.addStretch()
+        right.addLayout(mode_row)
+
+        # Stacked editors
+        self._editor_stack = QStackedWidget()
+
+        # Page 0 — simple
+        simple_page = QWidget()
+        sp_layout = QVBoxLayout(simple_page)
+        sp_layout.setContentsMargins(0,0,0,0)
         self._pat_editor = PatternEditorWidget()
-        right.addWidget(self._pat_editor, alignment=Qt.AlignmentFlag.AlignLeft)
+        sp_layout.addWidget(self._pat_editor, alignment=Qt.AlignmentFlag.AlignLeft)
+        clr_btn = QPushButton("Clear")
+        clr_btn.setStyleSheet(BTN_NEUTRAL)
+        clr_btn.setMaximumWidth(80)
+        clr_btn.clicked.connect(self._pat_editor.clear)
+        sp_layout.addWidget(clr_btn)
+        sp_layout.addStretch()
+        self._editor_stack.addWidget(simple_page)
 
-        editor_btns = QHBoxLayout()
-        clear_btn = QPushButton("Clear")
-        clear_btn.setStyleSheet(BTN_NEUTRAL)
-        clear_btn.clicked.connect(self._pat_editor.clear)
-        editor_btns.addWidget(clear_btn)
+        # Page 1 — compound
+        self._compound_editor = CompoundEditorWidget()
+        self._editor_stack.addWidget(self._compound_editor)
 
+        self._simple_radio.toggled.connect(
+            lambda on: self._editor_stack.setCurrentIndex(0 if on else 1)
+        )
+        right.addWidget(self._editor_stack, stretch=1)
+
+        # Save button
         self._save_pat_btn = QPushButton("💾  Save Pattern")
         self._save_pat_btn.setStyleSheet(BTN_SUCCESS)
         self._save_pat_btn.clicked.connect(self._save_pattern)
-        editor_btns.addWidget(self._save_pat_btn)
-        right.addLayout(editor_btns)
-        right.addStretch()
+        right.addWidget(self._save_pat_btn)
 
-        layout.addLayout(right)
+        layout.addLayout(right, stretch=1)
         self._refresh_patterns_list()
         return w
 
@@ -466,9 +521,9 @@ class CallerMainWindow(QMainWindow):
             QMessageBox.warning(self, "No Session", "Create or load a session first.")
             return
 
-        pattern = self._get_selected_pattern()
-        if not pattern:
-            QMessageBox.warning(self, "No Pattern", "Select a pattern before starting.")
+        patterns = self._get_selected_patterns()
+        if not patterns:
+            QMessageBox.warning(self, "No Pattern", "Select at least one pattern before starting.")
             return
 
         # End any active game first
@@ -477,14 +532,14 @@ class CallerMainWindow(QMainWindow):
 
         game = Game(
             session_id=self._session.id,
-            pattern_id=pattern.id,
+            pattern_ids=[p.id for p in patterns],
             prize_amount=self._prize_spin.value(),
             status="active",
         )
         self._game = self.db.create_game(game)
         self._game.status = "active"
 
-        self._active_pattern  = pattern
+        self._active_patterns = patterns          # list[Pattern]
         self._called_balls    = []
         self._remaining_balls = list(range(1, 76))
 
@@ -494,22 +549,25 @@ class CallerMainWindow(QMainWindow):
         self._ball_letter_label.clear()
         self._called_count_label.setText("0 / 75")
         self._prize_display.setText(f"${self._game.prize_amount:,.2f}")
-        self._pattern_name_label.setText(pattern.name)
-        self._pattern_preview.set_pattern(pattern.mask)
+        combined_name = " + ".join(p.name for p in patterns)
+        self._pattern_name_label.setText(combined_name)
+        combined_mask = _combine_masks(patterns)
+        self._pattern_preview.set_pattern(combined_mask)
 
         self._verify_panel.set_context(
-            self.db, self._game, self._active_pattern, self._called_balls
+            self.db, self._game, self._active_patterns, self._called_balls
         )
         self._verify_panel.reset()
         self._verify_panel.set_context(
-            self.db, self._game, self._active_pattern, self._called_balls
+            self.db, self._game, self._active_patterns, self._called_balls
         )
 
         self._refresh_games_list()
         self._update_ui_state()
         self._broadcast_state()
 
-        self._status_game.setText(f"Game #{self._game.id} — {pattern.name}")
+        combined_name = " + ".join(p.name for p in patterns)
+        self._status_game.setText(f"Game #{self._game.id} — {combined_name}")
         self._tabs.setCurrentIndex(1)   # jump to Call tab
 
     def _end_game(self) -> None:
@@ -530,10 +588,13 @@ class CallerMainWindow(QMainWindow):
         if not self._session:
             return
         for g in self.db.get_games_for_session(self._session.id):
-            pat = self.db.get_pattern_by_id(g.pattern_id)
-            pat_name = pat.name if pat else "?"
+            pat_names = []
+            for pid in g.pattern_ids:
+                p = self.db.get_pattern_by_id(pid)
+                if p: pat_names.append(p.name)
+            pat_label = " + ".join(pat_names) if pat_names else "?"
             self._games_list.addItem(
-                f"#{g.id}  {pat_name}  ${g.prize_amount:,.2f}  [{g.status}]  "
+                f"#{g.id}  {pat_label}  ${g.prize_amount:,.2f}  [{g.status}]  "
                 f"({len(g.drawn_balls)} balls)"
             )
 
@@ -605,68 +666,140 @@ class CallerMainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════════════
 
     def _refresh_patterns_combo(self) -> None:
-        self._pattern_combo.blockSignals(True)
-        self._pattern_combo.clear()
+        """Rebuild the setup-tab multi-select pattern checklist."""
+        self._pattern_list.blockSignals(True)
+        # Remember which names were checked
+        checked_names = {
+            self._pattern_list.item(i).text()
+            for i in range(self._pattern_list.count())
+            if self._pattern_list.item(i).checkState() == Qt.CheckState.Checked
+        }
+        self._pattern_list.clear()
         for p in self.db.get_all_patterns():
-            self._pattern_combo.addItem(p.name, userData=p)
-        self._pattern_combo.blockSignals(False)
-        self._on_pattern_selected(0)
+            item = QListWidgetItem(p.name)
+            item.setData(Qt.ItemDataRole.UserRole, p)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            state = Qt.CheckState.Checked if p.name in checked_names else Qt.CheckState.Unchecked
+            item.setCheckState(state)
+            self._pattern_list.addItem(item)
+        self._pattern_list.blockSignals(False)
+        self._on_pattern_selection_changed()
 
     def _refresh_patterns_list(self) -> None:
         self._patterns_list.clear()
         for p in self.db.get_all_patterns():
-            tag = " [custom]" if p.is_custom else ""
+            tag = ""
+            if p.is_compound:
+                op = p.compound_operator
+                tag = f" [{op}]"
+            elif p.is_custom:
+                tag = " [custom]"
             item = QListWidgetItem(f"{p.name}{tag}")
             item.setData(Qt.ItemDataRole.UserRole, p)
             self._patterns_list.addItem(item)
 
-    def _on_pattern_selected(self, _idx: int) -> None:
-        pass  # pattern resolved at game start time
+    def _on_pattern_selection_changed(self) -> None:
+        """Update the combined-pattern label when the selection changes."""
+        patterns = self._get_selected_patterns()
+        if not patterns:
+            self._combined_label.setText("No pattern selected")
+        elif len(patterns) == 1:
+            self._combined_label.setText(f"Pattern: {patterns[0].name}")
+        else:
+            names = " + ".join(p.name for p in patterns)
+            self._combined_label.setText(f"Combined: {names}")
 
+    def _get_selected_patterns(self) -> list[Pattern]:
+        """Return all checked patterns from the setup-tab list."""
+        result = []
+        for i in range(self._pattern_list.count()):
+            item = self._pattern_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                result.append(item.data(Qt.ItemDataRole.UserRole))
+        return result
+
+    # kept for compat — returns first selected pattern or None
     def _get_selected_pattern(self) -> Pattern | None:
-        idx = self._pattern_combo.currentIndex()
-        if idx < 0:
-            return None
-        return self._pattern_combo.itemData(idx)
+        pats = self._get_selected_patterns()
+        return pats[0] if pats else None
 
     def _on_pattern_list_select(self, current: QListWidgetItem, _prev) -> None:
         if not current:
             return
         p: Pattern = current.data(Qt.ItemDataRole.UserRole)
         self._pat_name_edit.setText(p.name)
-        self._pat_editor.set_mask(p.mask)
         self._del_pat_btn.setEnabled(p.is_custom)
+
+        if p.is_compound:
+            self._compound_radio.setChecked(True)
+            self._editor_stack.setCurrentIndex(1)
+            self._compound_editor.populate(self.db.get_all_patterns())
+            self._compound_editor.load_compound(p)
+        else:
+            self._simple_radio.setChecked(True)
+            self._editor_stack.setCurrentIndex(0)
+            self._pat_editor.set_mask(p.mask)
 
     def _new_pattern(self) -> None:
         self._pat_name_edit.clear()
         self._pat_editor.clear()
+        self._compound_editor.clear()
+        self._simple_radio.setChecked(True)
+        self._editor_stack.setCurrentIndex(0)
         self._patterns_list.clearSelection()
         self._del_pat_btn.setEnabled(False)
+        # Refresh compound editor member list with latest patterns
+        self._compound_editor.populate(self.db.get_all_patterns())
 
     def _save_pattern(self) -> None:
-        from models import Pattern
         name = self._pat_name_edit.text().strip()
         if not name:
             QMessageBox.warning(self, "Name Required", "Enter a name for the pattern.")
             return
-        if not self._pat_editor.has_cells_selected():
-            QMessageBox.warning(self, "Empty Pattern", "Select at least one cell.")
-            return
 
-        # Check if editing existing custom pattern
+        is_compound = self._compound_radio.isChecked()
+
+        if is_compound:
+            if not self._compound_editor.is_valid():
+                QMessageBox.warning(self, "Too Few Patterns",
+                                    "Select at least 2 component patterns.")
+                return
+            members = self._compound_editor.get_selected_patterns()
+            operator = self._compound_editor.get_operator()
+            # Compute union mask for display purposes
+            union = [[False]*5 for _ in range(5)]
+            for mp in members:
+                for r in range(5):
+                    for c in range(5):
+                        if mp.mask[r][c]:
+                            union[r][c] = True
+            new_p = Pattern(
+                name=name, mask=union, is_custom=True, is_compound=True,
+                compound_operator=operator,
+                compound_member_ids=[mp.id for mp in members],
+            )
+        else:
+            if not self._pat_editor.has_cells_selected():
+                QMessageBox.warning(self, "Empty Pattern", "Select at least one cell.")
+                return
+            new_p = Pattern(name=name, mask=self._pat_editor.get_mask(), is_custom=True)
+
+        # If editing existing custom pattern, update in place
         current = self._patterns_list.currentItem()
         if current:
-            p: Pattern = current.data(Qt.ItemDataRole.UserRole)
-            if p.is_custom:
-                p.name = name
-                p.mask = self._pat_editor.get_mask()
-                self.db.update_pattern(p)
+            existing: Pattern = current.data(Qt.ItemDataRole.UserRole)
+            if existing.is_custom:
+                existing.name = new_p.name
+                existing.mask = new_p.mask
+                existing.is_compound = new_p.is_compound
+                existing.compound_operator = new_p.compound_operator
+                existing.compound_member_ids = new_p.compound_member_ids
+                self.db.update_pattern(existing)
                 self._refresh_patterns_list()
                 self._refresh_patterns_combo()
                 return
 
-        pattern = Pattern(name=name, mask=self._pat_editor.get_mask(), is_custom=True)
-        self.db.save_pattern(pattern)
+        self.db.save_pattern(new_p)
         self._refresh_patterns_list()
         self._refresh_patterns_combo()
 
@@ -704,14 +837,25 @@ class CallerMainWindow(QMainWindow):
         self._clients_connected = count
         self._status_clients.setText(f"Displays: {count}")
 
+    def _patterns_by_id(self) -> dict:
+        """Convenience: return all DB patterns keyed by id for compound resolution."""
+        return {p.id: p for p in self.db.get_all_patterns()}
+
     def _broadcast_state(self) -> None:
+        patterns = getattr(self, "_active_patterns", [])
+        if patterns:
+            combined_name = " + ".join(p.name for p in patterns)
+            combined_mask = _combine_masks(patterns)
+        else:
+            combined_name = ""
+            combined_mask = None
         state = {
             "type":          "state",
             "session_name":  self._session.name if self._session else "",
             "game_id":       self._game.id if self._game else None,
             "game_status":   self._game.status if self._game else "idle",
-            "pattern_name":  self._active_pattern.name if self._active_pattern else "",
-            "pattern_mask":  self._active_pattern.mask if self._active_pattern else None,
+            "pattern_name":  combined_name,
+            "pattern_mask":  combined_mask,
             "prize_amount":  self._game.prize_amount if self._game else 0,
             "called_balls":  list(self._called_balls),
             "last_ball":     self._called_balls[-1] if self._called_balls else None,

@@ -62,8 +62,11 @@ class Pattern:
     The FREE space is always treated as marked automatically.
     """
     name: str
-    mask: list[list[bool]]       # mask[row][col]
+    mask: list[list[bool]]       # mask[row][col]; union of members for compound patterns
     is_custom: bool = False
+    is_compound: bool = False
+    compound_operator: str = "OR"          # "AND" | "OR" — only used when is_compound=True
+    compound_member_ids: list[int] = field(default_factory=list)
     id: Optional[int] = None
 
     def required_cells(self) -> list[tuple[int, int]]:

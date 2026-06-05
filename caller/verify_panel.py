@@ -229,7 +229,7 @@ class VerifyPanel(QWidget):
     # ── Internal ──────────────────────────────────────────────────────────
 
     def _do_verify(self) -> None:
-        from card_generator import check_win, describe_missing
+        from card_generator import resolve_win, resolve_describe
 
         serial = self._serial_edit.text().strip().upper()
         if not serial:
@@ -250,8 +250,10 @@ class VerifyPanel(QWidget):
             return
 
         self._verified_card = card
-        called_set = set(self._called_balls)
-        # Build combined mask for display (union of all selected patterns)
+        all_patterns = {p.id: p for p in self._db.get_all_patterns()}
+        called_set   = set(self._called_balls)
+
+        # Build display mask: union of all top-level pattern masks (including compound union masks)
         if self._patterns:
             combined_mask = [[False]*5 for _ in range(5)]
             for p in self._patterns:
@@ -265,7 +267,7 @@ class VerifyPanel(QWidget):
         self._card_grid.show_card(card.grid, called_set, combined_mask)
 
         if self._game and self._patterns:
-            is_win = check_win(card, self._patterns, self._called_balls)
+            is_win = resolve_win(card, self._patterns, self._called_balls, all_patterns)
             self._verified_is_win = is_win
 
             if is_win:
@@ -276,13 +278,12 @@ class VerifyPanel(QWidget):
                     f"Pattern: {pat_names}\n"
                     f"Balls called: {len(self._called_balls)}"
                 )
-                # Only allow recording if not already recorded
                 existing = [w.card_serial for w in self._db.get_winners_for_game(self._game.id)]
                 self._record_btn.setEnabled(serial not in existing)
             else:
                 self._result_label.setText("✗ No Bingo")
                 self._result_label.setStyleSheet("color: #DC2626;")
-                desc = describe_missing(card, self._patterns, self._called_balls)
+                desc = resolve_describe(card, self._patterns, self._called_balls, all_patterns)
                 self._detail_label.setText(desc)
                 self._record_btn.setEnabled(False)
         else:

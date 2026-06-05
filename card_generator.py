@@ -224,3 +224,122 @@ def describe_missing(
         return "✓ BINGO!"
     labels = [cell_label(v) for _, _, v in missing]
     return "Needs: " + ", ".join(labels)
+
+
+# ---------------------------------------------------------------------------
+# Compound-pattern resolution
+# ---------------------------------------------------------------------------
+
+def resolve_win(
+    card: BingoCard,
+    patterns: "list[Pattern]",
+    called_balls: list[int],
+    all_patterns: "dict[int, Pattern]",
+) -> bool:
+    """
+    Win check that fully supports compound patterns (AND / OR groups).
+
+    patterns        — game-level selected patterns; ALL must be satisfied.
+    all_patterns    — dict {id: Pattern} used to look up compound members.
+
+    Each pattern may itself be compound (AND/OR of sub-patterns), allowing
+    arbitrarily nested definitions such as Hardway Bingo.
+    """
+    return all(
+        _resolve_one(card, p, called_balls, all_patterns)
+        for p in patterns
+    )
+
+
+def _resolve_one(
+    card: BingoCard,
+    pattern: "Pattern",
+    called_balls: list[int],
+    all_patterns: "dict[int, Pattern]",
+) -> bool:
+    if not pattern.is_compound:
+        return check_win(card, pattern, called_balls)
+
+    members = [all_patterns[mid] for mid in pattern.compound_member_ids if mid in all_patterns]
+    if not members:
+        return False
+
+    results = [_resolve_one(card, m, called_balls, all_patterns) for m in members]
+    return any(results) if pattern.compound_operator == "OR" else all(results)
+
+
+def resolve_missing(
+    card: BingoCard,
+    patterns: "list[Pattern]",
+    called_balls: list[int],
+    all_patterns: "dict[int, Pattern]",
+) -> list[tuple[int, int, int]]:
+    """
+    Return (row, col, value) tuples still needed for a win.
+
+    For AND patterns / AND compounds  : union of all missing cells.
+    For OR compounds                  : cells missing from the *nearest* member
+                                        (the one with fewest uncalled required cells).
+    Plain check_win / get_missing_cells still work for simple patterns.
+    """
+    missing: list[tuple[int, int, int]] = []
+    for p in patterns:
+        missing.extend(_missing_one(card, p, called_balls, all_patterns))
+    # Deduplicate while preserving order
+    seen: set[tuple[int,int]] = set()
+    unique = []
+    for item in missing:
+        key = (item[0], item[1])
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
+
+
+def _missing_one(
+    card: BingoCard,
+    pattern: "Pattern",
+    called_balls: list[int],
+    all_patterns: "dict[int, Pattern]",
+) -> list[tuple[int, int, int]]:
+    if not pattern.is_compound:
+        return get_missing_cells(card, pattern, called_balls)
+
+    members = [all_patterns[mid] for mid in pattern.compound_member_ids if mid in all_patterns]
+    if not members:
+        return []
+
+    if pattern.compound_operator == "AND":
+        # Must complete ALL members — show union of missing cells
+        missing: list[tuple[int, int, int]] = []
+        seen: set[tuple[int,int]] = set()
+        for m in members:
+            for item in _missing_one(card, m, called_balls, all_patterns):
+                key = (item[0], item[1])
+                if key not in seen:
+                    seen.add(key)
+                    missing.append(item)
+        return missing
+    else:
+        # OR — already won if any member is satisfied
+        if any(_resolve_one(card, m, called_balls, all_patterns) for m in members):
+            return []
+        # Return the nearest member (fewest missing cells)
+        candidates = [_missing_one(card, m, called_balls, all_patterns) for m in members]
+        return min(candidates, key=len) if candidates else []
+
+
+def resolve_describe(
+    card: BingoCard,
+    patterns: "list[Pattern]",
+    called_balls: list[int],
+    all_patterns: "dict[int, Pattern]",
+) -> str:
+    """Human-readable win status using compound-aware resolution."""
+    if resolve_win(card, patterns, called_balls, all_patterns):
+        return "✓ BINGO!"
+    missing = resolve_missing(card, patterns, called_balls, all_patterns)
+    if not missing:
+        return "✓ BINGO!"
+    labels = [cell_label(v) for _, _, v in missing]
+    return "Needs: " + ", ".join(labels)
